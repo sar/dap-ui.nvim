@@ -1,13 +1,12 @@
 local config = require("dapui.config")
 local util = require("dapui.util")
 
----@class BufBreakpoints
----@field mark_breakpoint_map table
----@field expanded_breakpoints table
+---@class dapui.BufBreakpoints
+---@field state UIState
 local BufBreakpoints = {}
 
-function BufBreakpoints:new()
-  local elem = { mark_breakpoint_map = {}, expanded_breakpoints = {} }
+function BufBreakpoints:new(state)
+  local elem = { state = state }
   setmetatable(elem, self)
   self.__index = self
   return elem
@@ -23,42 +22,39 @@ local function open_frame_callback(current_bp)
   end
 end
 
-function BufBreakpoints:render(
-  render_state,
-  buffer,
-  breakpoints,
-  current_line,
-  current_file,
-  indent
-)
+---@param canvas dapui.Canvas
+function BufBreakpoints:render(canvas, buffer, breakpoints, current_line, current_file, indent)
   indent = indent or config.windows().indent
   local function is_current_line(bp)
     return bp.line == current_line and bp.file == current_file
   end
-  for _, bp in pairs(breakpoints) do
-    local line_no = render_state:length() + 1
+  for _, bp in ipairs(breakpoints) do
     local text = vim.api.nvim_buf_get_lines(buffer, bp.line - 1, bp.line, false)
     if vim.tbl_count(text) ~= 0 then
-      local new_line = string.rep(" ", indent) .. bp.line
-      render_state:add_match(
-        is_current_line(bp) and "DapUIBreakpointsCurrentLine" or "DapUIBreakpointsLine",
-        line_no,
-        indent + 1,
-        #tostring(bp.line)
-      )
-
-      new_line = new_line .. " " .. vim.trim(text[1])
-      render_state:add_line(new_line)
-      render_state:add_mapping(config.actions.OPEN, open_frame_callback(bp))
+      canvas:add_mapping(config.actions.OPEN, open_frame_callback(bp))
+      canvas:add_mapping(config.actions.TOGGLE, function()
+        self.state:toggle_breakpoint(bp)
+      end)
+      canvas:write(string.rep(" ", indent))
+      local group
+      if not bp.enabled then
+        group = "DapUIBreakpointsDisabledLine"
+      elseif is_current_line(bp) then
+        group = "DapUIBreakpointsCurrentLine"
+      else
+        group = "DapUIBreakpointsLine"
+      end
+      canvas:write(tostring(bp.line), { group = group })
+      canvas:write(" " .. vim.trim(text[1]) .. "\n")
 
       local info_indent = indent + #tostring(bp.line) + 1
       local whitespace = string.rep(" ", info_indent)
 
       local function add_info(message, data)
-        local log_line = whitespace .. message .. " " .. data
-        render_state:add_line(log_line)
-        render_state:add_match("DapUIBreakpointsInfo", render_state:length(), info_indent, #message)
-        render_state:add_mapping(config.actions.OPEN, open_frame_callback(bp))
+        canvas:add_mapping(config.actions.OPEN, open_frame_callback(bp))
+        canvas:write(whitespace)
+        canvas:write(message, { group = "DapUIBreakpointsInfo" })
+        canvas:write(" " .. data .. "\n")
       end
       if bp.logMessage then
         add_info("Log Message:", bp.logMessage)
@@ -71,11 +67,12 @@ function BufBreakpoints:render(
       end
     end
   end
+  canvas:remove_line()
 end
 
----@return BufBreakpoints
-local function new()
-  return BufBreakpoints:new()
+---@return dapui.BufBreakpoints
+local function new(state)
+  return BufBreakpoints:new(state)
 end
 
 return new

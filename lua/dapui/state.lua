@@ -11,6 +11,7 @@ local util = require("dapui.util")
 ---@field private _stopped_thread_id string,
 ---@field private _listeners table
 ---@field private _step_number integer
+---@field private _disabled_breakpoints table<string, table<integer, table>>
 local UIState = {}
 
 local events = { CLEAR = "clear", REFRESH = "refresh" }
@@ -27,6 +28,7 @@ function UIState:new()
     _watches = {},
     _stopped_thread_id = nil,
     _step_number = 0,
+    _disabled_breakpoints = {},
     _listeners = { [events.CLEAR] = {}, [events.REFRESH] = {} },
   }
   setmetatable(state, self)
@@ -53,6 +55,12 @@ function UIState:attach(dap, listener_id)
   dap.listeners.after.event_terminated[listener_id] = function()
     self:_clear()
   end
+  dap.listeners.after.disconnect[listener_id] = function()
+    self:_clear()
+  end
+  dap.listeners.after.event_exited[listener_id] = function()
+    self:_clear()
+  end
   dap.listeners.after.event_stopped[listener_id] = function()
     self._step_number = self._step_number + 1
   end
@@ -66,15 +74,25 @@ function UIState:attach(dap, listener_id)
           function() end
         )
       end
-      for ref, _ in pairs(self._monitored_vars) do
-        session:request("variables", { variablesReference = ref }, function() end)
-      end
       self:_refresh_watches(session)
     end
   end
 
   dap.listeners.after.variables[listener_id] = function(session, err, response, request)
+    if not request then
+      -- Session has been closed since request was made.
+      return
+    end
     if not err then
+      for _, variable in pairs(response.variables) do
+        if self._monitored_vars[variable.variablesReference] then
+          session:request(
+            "variables",
+            { variablesReference = variable.variablesReference },
+            function() end
+          )
+        end
+      end
       self._variables[request.variablesReference] = response.variables
       self:_emit_refreshed(session)
     end
@@ -96,9 +114,13 @@ function UIState:attach(dap, listener_id)
     end
   end
 
-  dap.listeners.after.evaluate[listener_id] = function(session, err, _, request)
-    if not err and request.context == "repl" then
-      self:_refresh_scopes(session)
+  dap.listeners.after.evaluate[listener_id] = function(session, err, response)
+    if not err and response.variablesReference then
+      session:request(
+        "variables",
+        { variablesReference = response.variablesReference },
+        function() end
+      )
     end
   end
 
@@ -119,14 +141,6 @@ function UIState:_refresh_scopes(session)
   session:request("scopes", { frameId = session.current_frame.id }, function() end)
 end
 
-function UIState:_refresh(session)
-  if not session.current_frame then
-    return
-  end
-  self:_refresh_scopes(session)
-  session:request("threads", nil, function() end)
-end
-
 function UIState:_refresh_watches(session)
   for expression, expr_data in pairs(self._watches) do
     session:request("evaluate", {
@@ -136,24 +150,26 @@ function UIState:_refresh_watches(session)
     }, function(err, response)
       expr_data.evaluated = response
       expr_data.error = err and util.format_error(err)
-      if not err and response.variablesReference then
-        session:request(
-          "variables",
-          { variablesReference = response.variablesReference },
-          function() end
-        )
-      end
       self:_emit_refreshed(session)
     end)
   end
 end
 
 function UIState:_emit_refreshed(session)
-  if not self:current_frame() or (self:current_frame().id ~= session.current_frame.id) then
+  if
+    not session
+    or not self:current_frame()
+    or not session.current_frame
+    or (self:current_frame().id ~= session.current_frame.id)
+  then
     self._monitored_vars = {}
   end
-  self._current_frame = session.current_frame
-  self._stopped_thread_id = session.stopped_thread_id
+  if session then
+    self._current_frame = session.current_frame
+    self._stopped_thread_id = session.stopped_thread_id
+  else
+    self:_clear()
+  end
   for _, receiver in pairs(self._listeners[events.REFRESH]) do
     receiver(session)
   end
@@ -176,7 +192,7 @@ end
 
 function UIState:stop_monitor(var_ref)
   self._monitored_vars[var_ref] = (self._monitored_vars[var_ref] or 1) - 1
-  if self._monitored_vars[var_ref] then
+  if self._monitored_vars[var_ref] == 0 then
     self._monitored_vars[var_ref] = nil
     util.with_session(function(session)
       self:_emit_refreshed(session)
@@ -217,7 +233,7 @@ function UIState:set_variable(container_ref, variable, value)
         { expression = variable.evaluateName, value = value, frameId = frame_id },
         function(err)
           if err then
-            vim.notify(util.format_error(err))
+            util.notify(util.format_error(err))
           end
         end
       )
@@ -227,13 +243,14 @@ function UIState:set_variable(container_ref, variable, value)
         { variablesReference = container_ref, name = variable.name, value = value },
         function(err)
           if err then
-            vim.notify(util.format_error(err))
+            util.notify(util.format_error(err))
           end
         end
       )
     else
-      vim.notify(
-        "Debug server doesn't support setting " .. (variable.evaluateName or variable.name)
+      util.notify(
+        "Debug server doesn't support setting " .. (variable.evaluateName or variable.name),
+        vim.log.levels.WARN
       )
     end
   end)
@@ -241,15 +258,66 @@ end
 
 function UIState:breakpoints()
   local breakpoints = require("dap.breakpoints").get() or {}
-  for buffer, buf_points in pairs(breakpoints) do
-    if not vim.tbl_isempty(buf_points) then
-      local buf_name = vim.fn.bufname(buffer)
-      for _, bp in pairs(buf_points) do
-        bp.file = buf_name
+  local merged_breakpoints = {}
+  local buffers = {}
+  for buf, _ in pairs(breakpoints) do
+    buffers[buf] = true
+  end
+  for buf_name, _ in pairs(self._disabled_breakpoints) do
+    local buf = vim.fn.bufnr(buf_name)
+    buffers[buf] = true
+  end
+  for buffer, _ in pairs(buffers) do
+    local buf_points = breakpoints[buffer] or {}
+    local buf_name = vim.fn.bufname(buffer)
+    for _, bp in ipairs(buf_points) do
+      bp.file = buf_name
+      bp.enabled = true
+      if self._disabled_breakpoints[bp.file] then
+        self._disabled_breakpoints[bp.file][bp.line] = nil
       end
     end
+    merged_breakpoints[buffer] = buf_points
+    for _, bp in pairs(self._disabled_breakpoints[buf_name] or {}) do
+      table.insert(merged_breakpoints[buffer], bp)
+    end
+    table.sort(merged_breakpoints[buffer], function(a, b)
+      return a.line < b.line
+    end)
   end
-  return breakpoints
+  return merged_breakpoints
+end
+
+function UIState:toggle_breakpoint(bp)
+  require("dap.breakpoints").toggle({
+    condition = bp.condition,
+    hit_condition = bp.hitCondition,
+    log_message = bp.logMessage,
+  }, vim.fn.bufnr(bp.file), bp.line)
+  local buffer_breakpoints = require("dap.breakpoints").get(bp.file)
+  local enabled = false
+  for _, buf_bp in ipairs(buffer_breakpoints) do
+    if buf_bp.line == bp.line then
+      enabled = true
+      break
+    end
+  end
+
+  if not self._disabled_breakpoints[bp.file] then
+    self._disabled_breakpoints[bp.file] = {}
+  end
+
+  if not enabled then
+    bp.enabled = false
+    self._disabled_breakpoints[bp.file][bp.line] = bp
+  else
+    self._disabled_breakpoints[bp.file][bp.line] = nil
+  end
+  util.with_session(function(session)
+    self:_emit_refreshed(session)
+  end, function()
+    self:_emit_refreshed()
+  end)
 end
 
 function UIState:add_watch(expression, context)
@@ -296,12 +364,6 @@ end
 
 function UIState:on_clear(callback)
   self:_add_listener(events.CLEAR, callback)
-end
-
-function UIState:refresh()
-  util.with_session(function(session)
-    self:_refresh(session)
-  end)
 end
 
 ---@return UIState

@@ -1,8 +1,11 @@
 ---@tag nvim-dap-ui
+
+local dap = require("dap")
 local dapui = {}
 
 local windows = require("dapui.windows")
 local config = require("dapui.config")
+local util = require("dapui.util")
 local ui_state
 
 ---@return Element
@@ -65,6 +68,8 @@ function dapui.float_element(elem_name, settings)
   end)
 end
 
+local prev_expr = nil
+
 ---Open a floating window containing the result of evaluting an expression
 ---
 ---If no fixed dimensions are given, the window will expand to fit the contents
@@ -76,21 +81,30 @@ end
 ---@field height integer: Fixed height of window
 ---@field enter boolean: Whether or not to enter the window after opening
 function dapui.eval(expr, settings)
-  settings = settings or {}
-  if open_float then
-    open_float:jump_to()
+  if not dap.session() then
+    util.notify("No active debug session", vim.log.levels.WARN)
     return
   end
+  settings = settings or {}
   if not expr then
     if vim.fn.mode() == "v" then
       local start = vim.fn.getpos("v")
       local finish = vim.fn.getpos(".")
-      local lines = require("dapui.util").get_selection(start, finish)
+      local lines = util.get_selection(start, finish)
       expr = table.concat(lines, "\n")
     else
       expr = expr or vim.fn.expand("<cexpr>")
     end
   end
+  if open_float then
+    if prev_expr == expr then
+      open_float:jump_to()
+      return
+    else
+      open_float:close()
+    end
+  end
+  prev_expr = expr
   local elem = require("dapui.elements.hover")
   elem.set_expression(expr, settings.context)
   vim.schedule(function()
@@ -104,9 +118,21 @@ function dapui.eval(expr, settings)
   end)
 end
 
+function dapui._dump_state()
+  local data = vim.inspect(ui_state)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(data, "\n"))
+  vim.cmd("sb " .. buf)
+end
+
+local refresh_control_panel = function() end
+
 function dapui.setup(user_config)
-  local dap = require("dap")
   local render = require("dapui.render")
+  if ui_state then
+    util.notify("Setup called twice", vim.log.levels.DEBUG)
+  end
+  render.loop.clear()
 
   config.setup(user_config)
 
@@ -114,8 +140,10 @@ function dapui.setup(user_config)
   ui_state = UIState()
   ui_state:attach(dap)
 
+  local buf_name_map = {}
   for _, module in pairs(config.elements) do
     local elem = element(module)
+    buf_name_map[module] = elem.name ~= "DAP REPL" and elem.name or "\\[dap-repl\\]"
     elem.setup(ui_state)
     render.loop.register_element(elem)
     for _, event in pairs(elem.dap_after_listeners or {}) do
@@ -125,70 +153,286 @@ function dapui.setup(user_config)
     end
   end
 
+  if config.controls.enabled and config.controls.element ~= "" then
+    local buf_name = buf_name_map[config.controls.element]
+
+    local group = vim.api.nvim_create_augroup("DAPUIControls", {})
+    local win
+
+    refresh_control_panel = function()
+      if win then
+        local is_current = win == vim.fn.win_getid()
+        if not pcall(vim.api.nvim_win_set_option, win, "winbar", dapui.controls(is_current)) then
+          win = nil
+        end
+      end
+    end
+
+    local list_id = "dapui_controls"
+    local events = {
+      "event_terminated",
+      "disconnect",
+      "event_exited",
+      "event_stopped",
+      "threads",
+      "event_continued",
+    }
+    for _, event in ipairs(events) do
+      dap.listeners.after[event][list_id] = refresh_control_panel
+    end
+
+    local cb = function(opts)
+      if win then
+        return
+      end
+
+      win = vim.fn.bufwinid(opts.buf)
+      if win == -1 then
+        win = nil
+        return
+      end
+      refresh_control_panel()
+      vim.api.nvim_create_autocmd({ "WinClosed", "BufWinLeave" }, {
+        group = group,
+        callback = function()
+          if win and not vim.api.nvim_win_is_valid(win) then
+            win = nil
+          end
+        end,
+      })
+    end
+    vim.api.nvim_create_autocmd({ "FileType" }, {
+      pattern = element(config.controls.element).buf_options.filetype,
+      group = group,
+      callback = cb,
+    })
+    vim.api.nvim_create_autocmd("BufWinEnter", {
+      pattern = buf_name,
+      group = group,
+      callback = cb,
+    })
+    vim.api.nvim_create_autocmd("WinEnter", {
+      pattern = buf_name,
+      group = group,
+      callback = function()
+        local winbar = dapui.controls(true)
+        vim.api.nvim_win_set_option(vim.api.nvim_get_current_win(), "winbar", winbar)
+      end,
+    })
+    vim.api.nvim_create_autocmd("WinLeave", {
+      pattern = buf_name,
+      group = group,
+      callback = function()
+        local winbar = dapui.controls(false)
+        vim.api.nvim_win_set_option(vim.api.nvim_get_current_win(), "winbar", winbar)
+      end,
+    })
+  end
+
   windows.setup()
 
   ui_state:on_refresh(function()
     render.loop.run()
   end)
+  ui_state:on_clear(function()
+    render.loop.run()
+  end)
 end
 
----Close either or both the tray and sidebar
----@param component string: "tray" or "sidebar"
-function dapui.close(component)
-  windows.tray:update_sizes()
-  windows.sidebar:update_sizes()
-  if not component or component == "tray" then
-    windows.tray:update_sizes()
-    windows.tray:close()
-  end
-  if not component or component == "sidebar" then
-    windows.sidebar:update_sizes()
-    windows.sidebar:close()
+---Update the config.render settings and re-render windows
+---@param update table: Updated settings, from the `render` table of the config
+function dapui.update_render(update)
+  config.update_render(update)
+  local render = require("dapui.render")
+  render.loop.run()
+end
+
+local function keep_cmdheight(cb)
+  local cmd_height = vim.o.cmdheight
+
+  cb()
+
+  vim.o.cmdheight = cmd_height
+end
+
+---Close one or all of the window layouts
+---@param opts table
+---@field layout number|nil: Index of layout in config
+function dapui.close(opts)
+  keep_cmdheight(function()
+    opts = opts or {}
+    if type(opts) == "number" then
+      opts = { layout = opts }
+    end
+    local layout = opts.layout
+
+    for _, win_layout in ipairs(windows.layouts) do
+      win_layout:update_sizes()
+    end
+    for i, win_layout in ipairs(windows.layouts) do
+      if not layout or layout == i then
+        win_layout:update_sizes()
+        win_layout:close()
+      end
+    end
+  end)
+end
+
+---@generic T
+---@param list T[]
+---@return fun(): number, T
+local function reverse(list)
+  local i = #list + 1
+  return function()
+    i = i - 1
+    if i <= 0 then
+      return nil
+    end
+    return i, list[i]
   end
 end
 
----Open either or both the tray and sidebar
----@param component string: "tray" or "sidebar"
-function dapui.open(component)
-  windows.tray:update_sizes()
-  windows.sidebar:update_sizes()
-  local open_sidebar = false
-  if component == "tray" and windows.sidebar:is_open() then
-    windows.sidebar:close()
-    open_sidebar = true
-  end
-  if not component or component == "tray" then
-    windows.tray:open()
-  end
-  if not component or component == "sidebar" then
-    windows.sidebar:open()
-  end
-  if open_sidebar then
-    windows.sidebar:open()
-  end
-  windows.tray:resize()
+---Open one or all of the window layouts
+---@param opts table
+---@field layout number|nil: Index of layout in config
+---@field reset boolean: Reset windows to original size
+function dapui.open(opts)
+  keep_cmdheight(function()
+    opts = opts or {}
+    if type(opts) == "number" then
+      opts = { layout = opts }
+    end
+    local layout = opts.layout
+
+    for _, win_layout in ipairs(windows.layouts) do
+      win_layout:update_sizes()
+    end
+    local closed = {}
+    if layout then
+      for i = 1, (layout and layout - 1) or #windows.layouts, 1 do
+        if windows.layouts[i]:is_open() then
+          closed[#closed + 1] = i
+          windows.layouts[i]:close()
+        end
+      end
+    end
+
+    for i, win_layout in reverse(windows.layouts) do
+      if not layout or layout == i then
+        win_layout:open()
+      end
+    end
+
+    if #closed > 0 then
+      for _, i in ipairs(closed) do
+        windows.layouts[i]:open()
+      end
+    end
+
+    for _, win_layout in ipairs(windows.layouts) do
+      win_layout:resize(opts)
+    end
+  end)
+  refresh_control_panel()
 end
 
----Toggle either or both the tray and sidebar
----@param component string: "tray" or "sidebar"
-function dapui.toggle(component)
-  windows.tray:update_sizes()
-  windows.sidebar:update_sizes()
-  local open_sidebar = false
-  if component == "tray" and windows.sidebar:is_open() then
-    windows.sidebar:close()
-    open_sidebar = true
+---Toggle one or all of the window layouts.
+---@param opts table
+---@field layout number|nil: Index of layout in config
+---@field reset boolean: Reset windows to original size
+function dapui.toggle(opts)
+  keep_cmdheight(function()
+    opts = opts or {}
+    if type(opts) == "number" then
+      opts = { layout = opts }
+    end
+    local layout = opts.layout
+
+    for _, win_layout in reverse(windows.layouts) do
+      win_layout:update_sizes()
+    end
+
+    local closed = {}
+    if layout then
+      for i = 1, (layout and layout - 1) or #windows.layouts, 1 do
+        if windows.layouts[i]:is_open() then
+          closed[#closed + 1] = i
+          windows.layouts[i]:close()
+        end
+      end
+    end
+
+    for i, win_layout in reverse(windows.layouts) do
+      if not layout or layout == i then
+        win_layout:toggle()
+      end
+    end
+
+    for _, i in reverse(closed) do
+      windows.layouts[i]:open()
+    end
+
+    for _, win_layout in ipairs(windows.layouts) do
+      win_layout:resize(opts)
+    end
+  end)
+  refresh_control_panel()
+end
+
+_G._dapui = {
+  play = function()
+    local session = dap.session()
+    if not session or session.stopped_thread_id then
+      dap.continue()
+    else
+      dap.pause()
+    end
+  end,
+}
+setmetatable(_dapui, {
+  __index = function(_, key)
+    return function()
+      return dap[key]()
+    end
+  end,
+})
+
+function dapui.controls(is_active)
+  local session = dap.session()
+
+  local running = (session and not session.stopped_thread_id)
+
+  local avail_hl = function(group, allow_running)
+    if not session or (not allow_running and running) then
+      return is_active and "DapUIUnavailable" or "DapUIUnavailableNC"
+    end
+    return group
   end
-  if not component or component == "tray" then
-    windows.tray:toggle()
+
+  local icons = config.controls.icons
+  local elems = {
+    {
+      func = "play",
+      icon = running and icons.pause or icons.play,
+      hl = is_active and "DapUIPlayPause" or "DapUIPlayPauseNC",
+    },
+    { func = "step_into", hl = avail_hl(is_active and "DapUIStepInto" or "DapUIStepIntoNC") },
+    { func = "step_over", hl = avail_hl(is_active and "DapUIStepOver" or "DapUIStepOverNC") },
+    { func = "step_out", hl = avail_hl(is_active and "DapUIStepOut" or "DapUIStepOutNC") },
+    { func = "step_back", hl = avail_hl(is_active and "DapUIStepBack" or "DapUIStepBackNC") },
+    { func = "run_last", hl = is_active and "DapUIRestart" or "DapUIRestartNC" },
+    { func = "terminate", hl = avail_hl(is_active and "DapUIStop" or "DapUIStopNC", true) },
+  }
+  local bar = ""
+  for _, elem in ipairs(elems) do
+    bar = bar
+      .. ("  %%#%s#%%0@v:lua._dapui.%s@%s%%#0#"):format(
+        elem.hl,
+        elem.func,
+        elem.icon or icons[elem.func]
+      )
   end
-  if not component or component == "sidebar" then
-    windows.sidebar:toggle()
-  end
-  if open_sidebar then
-    windows.sidebar:open()
-  end
-  windows.tray:resize()
+  return bar
 end
 
 return dapui

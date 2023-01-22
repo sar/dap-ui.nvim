@@ -7,6 +7,7 @@ M.elements = {
   STACKS = "stacks",
   WATCHES = "watches",
   HOVER = "hover",
+  CONSOLE = "console",
 }
 
 M.actions = {
@@ -15,6 +16,7 @@ M.actions = {
   REMOVE = "remove",
   EDIT = "edit",
   REPL = "repl",
+  TOGGLE = "toggle",
 }
 
 M.FLOAT_MAPPINGS = {
@@ -22,7 +24,7 @@ M.FLOAT_MAPPINGS = {
 }
 
 local default_config = {
-  icons = { expanded = "▾", collapsed = "▸" },
+  icons = { expanded = "", collapsed = "", current_frame = "" },
   mappings = {
     -- Use a table to apply multiple mappings
     [M.actions.EXPAND] = { "<CR>", "<2-LeftMouse>" },
@@ -30,26 +32,34 @@ local default_config = {
     [M.actions.REMOVE] = "d",
     [M.actions.EDIT] = "e",
     [M.actions.REPL] = "r",
+    [M.actions.TOGGLE] = "t",
   },
-  sidebar = {
-    -- You can change the order of elements in the sidebar
-    elements = {
-      -- Provide IDs as strings or tables with "id" and "size" keys
-      {
-        id = M.elements.SCOPES,
-        size = 0.25, -- Can be float or integer > 1
+  element_mappings = {},
+  expand_lines = vim.fn.has("nvim-0.7") == 1,
+  layouts = {
+    {
+      -- You can change the order of elements in the sidebar
+      elements = {
+        -- Provide IDs as strings or tables with "id" and "size" keys
+        {
+          id = M.elements.SCOPES,
+          size = 0.25, -- Can be float or integer > 1
+        },
+        { id = M.elements.BREAKPOINTS, size = 0.25 },
+        { id = M.elements.STACKS, size = 0.25 },
+        { id = M.elements.WATCHES, size = 0.25 },
       },
-      { id = M.elements.BREAKPOINTS, size = 0.25 },
-      { id = M.elements.STACKS, size = 0.25 },
-      { id = M.elements.WATCHES, size = 0.25 },
+      size = 40,
+      position = "left", -- Can be "left" or "right"
     },
-    size = 40,
-    position = "left", -- Can be "left" or "right"
-  },
-  tray = {
-    elements = { M.elements.REPL },
-    size = 10,
-    position = "bottom", -- Can be "bottom" or "top"
+    {
+      elements = {
+        M.elements.REPL,
+        M.elements.CONSOLE,
+      },
+      size = 10,
+      position = "bottom", -- Can be "bottom" or "top"
+    },
   },
   floating = {
     max_height = nil, -- These can be integers or a float between 0 and 1.
@@ -59,7 +69,25 @@ local default_config = {
       [M.FLOAT_MAPPINGS.CLOSE] = { "q", "<Esc>" },
     },
   },
+  controls = {
+    enabled = vim.fn.exists("+winbar") == 1,
+    element = M.elements.REPL,
+    icons = {
+      pause = "",
+      play = "",
+      step_into = "",
+      step_over = "",
+      step_out = "",
+      step_back = "",
+      run_last = "",
+      terminate = "",
+    },
+  },
   windows = { indent = 1 },
+  render = {
+    max_type_length = nil, -- Can be integer or nil.
+    max_value_lines = 100, -- Can be integer or nil.
+  },
 }
 
 local user_config = {}
@@ -67,6 +95,11 @@ local user_config = {}
 local function fill_elements(area)
   area = vim.deepcopy(area)
   local filled = {}
+  vim.validate({
+    size = { area.size, "number" },
+    elements = { area.elements, "table" },
+    position = { area.position, "string" },
+  })
   for i, element in ipairs(area.elements) do
     if type(element) == "string" then
       filled[i] = { id = element, size = 1 / #area.elements }
@@ -79,11 +112,12 @@ local function fill_elements(area)
 end
 
 local dep_warnings = {}
+
 local function dep_warning(message)
   vim.schedule(function()
     if not dep_warnings[message] then
       dep_warnings[message] = true
-      vim.notify(message, "warn", { title = "nvim-dap-ui" })
+      require("dapui.util").notify(message, vim.log.levels.WARN)
     end
   end)
 end
@@ -97,33 +131,53 @@ local function fill_mappings(mappings)
 end
 
 function M.setup(config)
-  local filled = vim.tbl_deep_extend("keep", config or {}, default_config)
-  filled.mappings = fill_mappings(filled.mappings)
-  filled.floating.mappings = fill_mappings(filled.floating.mappings)
-  filled.sidebar = fill_elements(filled.sidebar)
-  filled.tray = fill_elements(filled.tray)
+  config = config or {}
+  local filled = vim.tbl_deep_extend("keep", config, default_config)
 
-  -- Deprecation notice --
-  if filled.sidebar.open_on_start or filled.tray.open_on_start then
-    dep_warning(
-      "Automatically opening the UI is deprecated.\n"
-        .. "You can replicate previous behaviour by adding the following to your config\n\n"
-        .. "local dap, dapui = require('dap'), require('dapui')\n"
-        .. "dap.listeners.after.event_initialized['dapui_config'] = function() dapui.open() end\n"
-        .. "dap.listeners.before.event_terminated['dapui_config'] = function() dapui.close() end\n"
-        .. "dap.listeners.before.event_exited['dapui_config'] = function() dapui.close() end\n\n"
-        .. "To hide this message, remove the `open_on_start` settings from your config"
-    )
+  if config.sidebar or config.tray then
+    dep_warning([[The 'sidebar' and 'tray' options are deprecated. Please use 'layouts' instead.
+To replicate previous default behaviour, provide the following
+```lua
+require('dapui').setup(
+  layouts = {
+    {
+      elements = {
+        'scopes',
+        'breakpoints',
+        'stacks',
+        'watches',
+      },
+      size = 40,
+      position = 'left',
+    },
+    {
+      elements = {
+        'repl',
+        'console',
+      },
+      size = 10,
+      position = 'bottom',
+    },
+  },
+)
+```]])
   end
-  if filled.sidebar.width then
-    filled.sidebar.size = filled.sidebar.width
-    dep_warning("Sidebar 'width' option has been deprecated. Use 'size' instead")
+
+  if config.layouts then
+    filled.layouts = config.layouts
   end
-  if filled.tray.height then
-    filled.tray.size = filled.tray.height
-    dep_warning("Tray 'height' option has been deprecated. Use 'size' instead")
+  filled.mappings = fill_mappings(filled.mappings)
+
+  local element_mappings = {}
+  for elem, mappings in pairs(filled.element_mappings) do
+    element_mappings[elem] = fill_mappings(mappings)
   end
-  ------------------------
+
+  filled.element_mappings = element_mappings
+  filled.floating.mappings = fill_mappings(filled.floating.mappings)
+  for i, layout in ipairs(filled.layouts) do
+    filled.layouts[i] = fill_elements(layout)
+  end
 
   user_config = filled
   require("dapui.config.highlights").setup()
@@ -145,6 +199,10 @@ function M.tray()
   return user_config.tray
 end
 
+function M.layouts()
+  return user_config.layouts
+end
+
 function M.floating()
   return user_config.floating
 end
@@ -152,5 +210,28 @@ end
 function M.windows()
   return user_config.windows
 end
+
+function M.render()
+  return user_config.render
+end
+
+function M.update_render(update)
+  user_config.render = vim.tbl_deep_extend("keep", update, user_config.render)
+end
+
+function M.expand_lines()
+  return user_config.expand_lines
+end
+
+function M.element_mapping(element, action)
+  return (user_config.element_mappings[element] and user_config.element_mappings[element][action])
+    or user_config.mappings[action]
+end
+
+setmetatable(M, {
+  __index = function(_, key)
+    return user_config[key]
+  end,
+})
 
 return M

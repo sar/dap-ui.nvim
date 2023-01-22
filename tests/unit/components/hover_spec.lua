@@ -3,6 +3,9 @@ local render = require("dapui.render")
 
 describe("checking hover", function()
   require("dapui.config").setup({})
+  after_each(function()
+    require("dapui.config").setup({})
+  end)
   assert:add_formatter(vim.inspect)
 
   local expression = "expr"
@@ -10,6 +13,7 @@ describe("checking hover", function()
 
   local mock_state
   local monitored
+  local watched = {}
   before_each(function()
     monitored = {}
     mock_state = {
@@ -17,6 +21,13 @@ describe("checking hover", function()
       monitor = function(_, ref)
         monitored[ref] = true
       end,
+      add_watch = function(_, expr)
+        watched[expr] = true
+      end,
+      remove_watch = function(_, expr)
+        watched[expr] = false
+      end,
+
       watch = function(_, expr)
         if expr == expression then
           return {
@@ -34,8 +45,6 @@ describe("checking hover", function()
             evaluated = nil,
           }
         end
-
-        assert(false, "Invalid watch expression")
       end,
       step_number = function()
         return 1
@@ -69,61 +78,71 @@ describe("checking hover", function()
 
   describe("in initial layout", function()
     it("creates lines", function()
-      local render_state = render.new_state()
+      local canvas = render.new_canvas()
       local component = Hover(expression, mock_state)
 
-      component:render(render_state)
+      component:render(canvas)
       local expected = { "▸ expr list = [0, 1, [2, 3, 4, 5]]" }
-      assert.are.same(expected, render_state.lines)
+      assert.are.same(expected, canvas.lines)
+    end)
+
+    it("truncates types", function()
+      require("dapui.config").setup({ render = { max_type_length = 3 } })
+      local canvas = render.new_canvas()
+      local component = Hover(expression, mock_state)
+
+      component:render(canvas)
+      local expected = { "▸ expr lis... = [0, 1, [2, 3, 4, 5]]" }
+      assert.are.same(expected, canvas.lines)
     end)
 
     it("creates matches", function()
-      local render_state = render.new_state()
+      local canvas = render.new_canvas()
       local component = Hover(expression, mock_state)
 
-      component:render(render_state)
+      component:render(canvas)
       local expected = {
         { "DapUIDecoration", { 1, 1, 4 } },
         { "DapUIType", { 1, 10, 4 } },
         { "DapUIValue", { 1, 17, 20 } },
       }
-      assert.are.same(expected, render_state.matches)
+      assert.are.same(expected, canvas.matches)
     end)
 
     it("creates expand mappings", function()
-      local render_state = render.new_state()
+      local canvas = render.new_canvas()
       local component = Hover(expression, mock_state)
 
-      component:render(render_state)
-      assert.equal(1, #render_state.mappings["expand"])
+      component:render(canvas)
+      assert.equal(1, #canvas.mappings["expand"])
     end)
   end)
 
   describe("with expanded expression", function()
     it("creates lines", function()
-      local render_state = render.new_state()
+      local canvas = render.new_canvas()
       local component = Hover(expression, mock_state)
 
-      component:render(render_state)
-      render_state.mappings["expand"][1][1]()
-      render_state = render.new_state()
-      component:render(render_state)
+      component:render(canvas)
+      canvas.mappings["expand"][1][1]()
+      canvas = render.new_canvas()
+      component:render(canvas)
       local expected = {
         "▾ expr list = [0, 1, [2, 3, 4, 5]]",
         " ▸ a list = [[2, 3, 4, 10]]",
         " ▸ b dict = {}",
       }
-      assert.are.same(expected, render_state.lines)
+      assert.are.same(expected, canvas.lines)
     end)
 
     it("creates matches", function()
-      local render_state = render.new_state()
+      local canvas = render.new_canvas()
       local component = Hover(expression, mock_state)
 
-      component:render(render_state)
-      render_state.mappings["expand"][1][1]()
-      render_state = render.new_state()
-      component:render(render_state)
+      component:render(canvas)
+      canvas.mappings["expand"][1][1]()
+      canvas = render.new_canvas()
+      component:render(canvas)
       local expected = {
         { "DapUIDecoration", { 1, 1, 4 } },
         { "DapUIType", { 1, 10, 4 } },
@@ -137,121 +156,109 @@ describe("checking hover", function()
         { "DapUIType", { 3, 8, 4 } },
         { "DapUIValue", { 3, 15, 2 } },
       }
-      assert.are.same(expected, render_state.matches)
+      assert.are.same(expected, canvas.matches)
     end)
 
     it("creates expand mappings", function()
-      local render_state = render.new_state()
+      local canvas = render.new_canvas()
       local component = Hover(expression, mock_state)
 
-      component:render(render_state)
-      render_state.mappings["expand"][1][1]()
-      render_state = render.new_state()
-      component:render(render_state)
-      assert.equal(3, #render_state.mappings["expand"])
+      component:render(canvas)
+      canvas.mappings["expand"][1][1]()
+      canvas = render.new_canvas()
+      component:render(canvas)
+      assert.equal(3, #canvas.mappings["expand"])
     end)
 
     it("closes expanded variable", function()
-      local render_state = render.new_state()
+      local canvas = render.new_canvas()
       local component = Hover(expression, mock_state)
 
-      component:render(render_state)
-      render_state.mappings["expand"][1][1]()
-      render_state.mappings["expand"][1][1]()
-      render_state = render.new_state()
-      component:render(render_state)
+      component:render(canvas)
+      canvas.mappings["expand"][1][1]()
+      canvas.mappings["expand"][1][1]()
+      canvas = render.new_canvas()
+      component:render(canvas)
       local expected = { "▸ expr list = [0, 1, [2, 3, 4, 5]]" }
-      assert.are.same(expected, render_state.lines)
+      assert.are.same(expected, canvas.lines)
     end)
     it("invalidates render when variables not ready", function()
-      local render_state = render.new_state()
+      local canvas = render.new_canvas()
       local component = Hover(expression, mock_state)
       mock_state.variables = function()
         return nil
       end
 
-      component:render(render_state)
-      render_state.mappings["expand"][1][1]()
-      render_state = render.new_state()
-      component:render(render_state)
-      assert.False(render_state.valid)
+      component:render(canvas)
+      canvas.mappings["expand"][1][1]()
+      canvas = render.new_canvas()
+      component:render(canvas)
+      assert.False(canvas.valid)
     end)
   end)
 
   describe("with error expression", function()
     it("creates lines", function()
-      local render_state = render.new_state()
+      local canvas = render.new_canvas()
       local component = Hover(bad_expr, mock_state)
 
-      component:render(render_state)
+      component:render(canvas)
       local expected = { "▸ bad_expr: Exception occurred during evaluation." }
-      assert.are.same(expected, render_state.lines)
+      assert.are.same(expected, canvas.lines)
     end)
 
     it("creates matches", function()
-      local render_state = render.new_state()
+      local canvas = render.new_canvas()
       local component = Hover(bad_expr, mock_state)
 
-      component:render(render_state)
+      component:render(canvas)
       local expected = { { "DapUIWatchesError", { 1, 1, 4 } }, { "DapUIValue", { 1, 15, 37 } } }
-      assert.are.same(expected, render_state.matches)
+      assert.are.same(expected, canvas.matches)
     end)
 
     it("doesn't create expand mappings", function()
-      local render_state = render.new_state()
+      local canvas = render.new_canvas()
       local component = Hover(bad_expr, mock_state)
 
-      component:render(render_state)
-      assert.equal(0, #render_state.mappings["expand"])
+      component:render(canvas)
+      assert.equal(0, #canvas.mappings["expand"])
     end)
   end)
 
   describe("in set mode", function()
-    local render_state
+    local canvas
     local component
-    local updated
-    before_each(function()
-      render_state = render.new_state()
+    local function setup()
+      canvas = render.new_canvas()
       component = Hover(expression, mock_state)
-      updated = {}
 
-      component:render(render_state)
-      render_state.mappings["edit"][1][1]()
-      render_state = render.new_state()
-      component:render(render_state)
-
-      mock_state.set_variable = function(_, container_ref, variable, value)
-        updated[#updated + 1] = { container_ref, variable, value }
-      end
-    end)
+      component:render(canvas)
+      canvas.mappings["edit"][1][1]()
+      canvas = render.new_canvas()
+      component:render(canvas)
+    end
 
     it("adds edit prompt", function()
-      assert.Not.Nil(render_state.prompt)
+      setup()
+      assert.Not.Nil(canvas.prompt)
     end)
 
-    it("fills prompt with current value", function()
-      assert.equal("[0, 1, [2, 3, 4, 5]]", render_state.prompt.fill)
+    it("fills prompt with current expresssion", function()
+      setup()
+      assert.equal("expr", canvas.prompt.fill)
     end)
 
-    it("updates variable value", function()
-      render_state.prompt.callback("new_value")
-      assert.are.same({
-        nil,
-        {
-          evaluateName = "expr",
-          presentationHint = {},
-          result = "[0, 1, [2, 3, 4, 5]]",
-          type = "list",
-          variablesReference = 1,
-        },
-        "new_value",
-      }, updated[1])
+    it("updates expression", function()
+      setup()
+      canvas.prompt.callback("new_expr")
+      assert.True(watched.new_expr)
     end)
 
     it("component resets mode", function()
-      render_state.prompt.callback("new_value")
-      render_state = render.new_state()
-      component:render(render_state)
+      setup()
+      canvas.prompt.callback("new_expr")
+      canvas = render.new_canvas()
+      component:render(canvas)
       assert.Nil(component.mode)
     end)
   end)

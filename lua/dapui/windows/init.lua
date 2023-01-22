@@ -8,26 +8,25 @@ local WindowLayout = require("dapui.windows.layout")
 
 local float_windows = {}
 
----@type WindowLayout
-M.sidebar = nil
----@type WindowLayout
-M.tray = nil
+---@type dapui.WindowLayout[]
+M.layouts = {}
 
-local function register_elements(elements)
-  local win_configs = {}
-  for _, win_config in pairs(elements) do
-    local exists, element = pcall(require, "dapui.elements." .. win_config.id)
+local function create_win_states(win_configs)
+  local win_states = {}
+  for _, win_state in pairs(win_configs) do
+    local exists, element = pcall(require, "dapui.elements." .. win_state.id)
     if exists then
-      win_config.element = element
-      win_configs[#win_configs + 1] = win_config
+      win_state.element = element
+      win_state.init_size = win_state.size
+      win_states[#win_states + 1] = win_state
     else
-      vim.notify("nvim-dap-ui: Element " .. win_config.id .. " does not exist")
+      util.notify("nvim-dap-ui: Element " .. win_state.id .. " does not exist", vim.log.levels.WARN)
     end
   end
-  return win_configs
+  return win_states
 end
 
-local function tray_layout(height, position, win_configs)
+local function horizontal_layout(height, position, win_configs)
   local open_cmd = position == "top" and "topleft" or "botright"
 
   local function open_tray_win(index)
@@ -35,7 +34,8 @@ local function tray_layout(height, position, win_configs)
   end
 
   return WindowLayout({
-    area_state = { size = height },
+    layout_type = "horizontal",
+    area_state = { size = height, init_size = height },
     win_states = win_configs,
     get_win_size = api.nvim_win_get_width,
     get_area_size = api.nvim_win_get_height,
@@ -46,14 +46,15 @@ local function tray_layout(height, position, win_configs)
   })
 end
 
-local function side_layout(width, position, win_configs)
+local function vertical_layout(width, position, win_configs)
   local open_cmd = position == "left" and "topleft" or "botright"
   local function open_side_win(index)
     vim.cmd(index == 1 and open_cmd .. " " .. "vsplit" or "split")
   end
 
   return WindowLayout({
-    area_state = { size = width },
+    layout_type = "vertical",
+    area_state = { size = width, init_size = width },
     win_states = win_configs,
     get_win_size = api.nvim_win_get_height,
     get_area_size = api.nvim_win_get_width,
@@ -64,22 +65,26 @@ local function side_layout(width, position, win_configs)
   })
 end
 
-local function area_layout(size, position, elements)
-  local win_configs = register_elements(elements)
+local function area_layout(size, position, win_configs)
+  local win_states = create_win_states(win_configs)
   local layout_func
   if position == "top" or position == "bottom" then
-    layout_func = tray_layout
+    layout_func = horizontal_layout
   else
-    layout_func = side_layout
+    layout_func = vertical_layout
   end
-  return layout_func(size, position, win_configs)
+  return layout_func(size, position, win_states)
 end
 
 function M.setup()
-  local tray_config = config.tray()
-  M.tray = area_layout(tray_config.size, tray_config.position, tray_config.elements)
-  local sidebar_config = config.sidebar()
-  M.sidebar = area_layout(sidebar_config.size, sidebar_config.position, sidebar_config.elements)
+  for _, layout in ipairs(M.layouts) do
+    layout:close()
+  end
+  local layout_configs = config.layouts()
+  M.layouts = {}
+  for i, layout in ipairs(layout_configs) do
+    M.layouts[i] = area_layout(layout.size, layout.position, layout.elements)
+  end
   vim.cmd([[
     augroup DapuiWindowsSetup
       au!
@@ -89,8 +94,9 @@ function M.setup()
 end
 
 function M._force_buffers()
-  M.tray:force_buffers()
-  M.sidebar:force_buffers()
+  for _, layout in ipairs(M.layouts) do
+    layout:force_buffers()
+  end
 end
 
 function M.open_float(element, position, settings)
@@ -106,19 +112,16 @@ function M.open_float(element, position, settings)
   local buf = float_win:get_buf()
   render.loop.register_buffer(element.name, buf)
   local listener_id = element.name .. buf .. "float"
-  render.loop.register_listener(
-    listener_id,
-    element.name,
-    "render",
-    function(rendered_buf, render_state)
-      if rendered_buf == buf then
-        float_win:resize(
-          settings.width or render_state:width(),
-          settings.height or render_state:length()
-        )
+  render.loop.register_listener(listener_id, element.name, "render", function(rendered_buf, canvas)
+    if rendered_buf == buf then
+      local width = settings.width or canvas:width()
+      local height = settings.height or canvas:length()
+      if width <= 0 or height <= 0 then
+        return
       end
+      float_win:resize(width, height)
     end
-  )
+  end)
   render.loop.register_listener(listener_id, element.name, "close", function(closed_buf)
     if closed_buf == buf then
       render.loop.unregister_listener(listener_id, element.name, "render")

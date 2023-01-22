@@ -1,14 +1,11 @@
 # nvim-dap-ui
 
-This is still early stage software. Bugs are expected and there may be breaking
-changes!
-
 ## Introduction
 
 A UI for [nvim-dap](https://github.com/mfussenegger/nvim-dap) which provides a
 good out of the box configuration.
 
-![Preview](https://user-images.githubusercontent.com/24252670/126842672-de9c6b78-eec2-4187-b48e-977686ec4080.png)
+![preview](https://user-images.githubusercontent.com/24252670/191198389-a1321363-c0f1-4ff1-b663-ab1350d2b393.png)
 
 ## Installation
 
@@ -49,11 +46,17 @@ Elements can also be displayed temporarily in a floating window.
 You can supply an object to the `require("dapui").setup()` function to
 configure the elements.
 
+The default icons use [codicons](https://github.com/microsoft/vscode-codicons)
+It's recommended to use this [fork](https://github.com/ChristianChiarulli/neovim-codicons) which fixes alignment issues
+for the terminal. If your terminal doesn't support font fallback and you need to have icons included in font you use
+you can patch it via [Font Patcher](https://github.com/ryanoasis/nerd-fonts#option-8-patch-your-own-font). 
+Simple step by step guide [here](https://github.com/mortepau/codicons.nvim#how-to-patch-fonts).
+
 Default settings:
 
 ```lua
 require("dapui").setup({
-  icons = { expanded = "▾", collapsed = "▸" },
+  icons = { expanded = "", collapsed = "", current_frame = "" },
   mappings = {
     -- Use a table to apply multiple mappings
     expand = { "<CR>", "<2-LeftMouse>" },
@@ -61,26 +64,62 @@ require("dapui").setup({
     remove = "d",
     edit = "e",
     repl = "r",
+    toggle = "t",
   },
-  sidebar = {
-    -- You can change the order of elements in the sidebar
-    elements = {
-      -- Provide as ID strings or tables with "id" and "size" keys
-      {
-        id = "scopes",
-        size = 0.25, -- Can be float or integer > 1
+  -- Use this to override mappings for specific elements
+  element_mappings = {
+    -- Example:
+    -- stacks = {
+    --   open = "<CR>",
+    --   expand = "o",
+    -- }
+  },
+  -- Expand lines larger than the window
+  -- Requires >= 0.7
+  expand_lines = vim.fn.has("nvim-0.7") == 1,
+  -- Layouts define sections of the screen to place windows.
+  -- The position can be "left", "right", "top" or "bottom".
+  -- The size specifies the height/width depending on position. It can be an Int
+  -- or a Float. Integer specifies height/width directly (i.e. 20 lines/columns) while
+  -- Float value specifies percentage (i.e. 0.3 - 30% of available lines/columns)
+  -- Elements are the elements shown in the layout (in order).
+  -- Layouts are opened in order so that earlier layouts take priority in window sizing.
+  layouts = {
+    {
+      elements = {
+      -- Elements can be strings or table with id and size keys.
+        { id = "scopes", size = 0.25 },
+        "breakpoints",
+        "stacks",
+        "watches",
       },
-      { id = "breakpoints", size = 0.25 },
-      { id = "stacks", size = 0.25 },
-      { id = "watches", size = 00.25 },
+      size = 40, -- 40 columns
+      position = "left",
     },
-    size = 40,
-    position = "left", -- Can be "left", "right", "top", "bottom"
+    {
+      elements = {
+        "repl",
+        "console",
+      },
+      size = 0.25, -- 25% of total lines
+      position = "bottom",
+    },
   },
-  tray = {
-    elements = { "repl" },
-    size = 10,
-    position = "bottom", -- Can be "left", "right", "top", "bottom"
+  controls = {
+    -- Requires Neovim nightly (or 0.8 when released)
+    enabled = true,
+    -- Display controls in this element
+    element = "repl",
+    icons = {
+      pause = "",
+      play = "",
+      step_into = "",
+      step_over = "",
+      step_out = "",
+      step_back = "",
+      run_last = "",
+      terminate = "",
+    },
   },
   floating = {
     max_height = nil, -- These can be integers or a float between 0 and 1.
@@ -91,6 +130,10 @@ require("dapui").setup({
     },
   },
   windows = { indent = 1 },
+  render = {
+    max_type_length = nil, -- Can be integer or nil.
+    max_value_lines = 100, -- Can be integer or nil.
+  }
 })
 ```
 
@@ -119,6 +162,7 @@ Displays the running threads and their stack frames.
 Mappings:
 
 - `open`: Jump to a place within the stack frame.
+- `toggle`: Toggle displaying [subtle](https://microsoft.github.io/debug-adapter-protocol/specification#Types_StackFrame) frames
 
 ### Watch Expressions
 
@@ -149,12 +193,19 @@ List all breakpoints currently set.
 Mappings:
 
 - `open`: Jump to the location the breakpoint is set
+- `toggle`: Enable/disable the selected breakpoint
 
 ### REPL
 
 Element ID: `repl`
 
 The REPL provided by nvim-dap.
+
+### Console
+
+Element ID: `console`
+
+The console window used by nvim-dap for the integrated terminal.
 
 ## Usage
 

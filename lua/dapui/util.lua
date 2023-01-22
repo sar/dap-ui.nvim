@@ -1,3 +1,5 @@
+local config = require("dapui.config")
+
 local M = {}
 
 local api = vim.api
@@ -10,6 +12,20 @@ function M.round(num)
   end
 end
 
+function M.notify(msg, level, opts)
+  return vim.notify(
+    msg,
+    level or vim.log.levels.INFO,
+    vim.tbl_extend("keep", opts or {}, {
+      title = "nvim-dap-ui",
+      icon = "",
+      on_open = function(win)
+        vim.api.nvim_buf_set_option(vim.api.nvim_win_get_buf(win), "filetype", "markdown")
+      end,
+    })
+  )
+end
+
 function M.is_uri(path)
   local scheme = path:match("^([a-z]+)://.*")
   if scheme then
@@ -20,10 +36,12 @@ function M.is_uri(path)
 end
 
 ---@param cb fun(session: table)
-function M.with_session(cb)
+function M.with_session(cb, fail_cb)
   local session = require("dap").session()
   if session then
     cb(session)
+  elseif fail_cb then
+    fail_cb()
   end
 end
 
@@ -72,7 +90,7 @@ function M.jump_to_frame(frame, session, set_frame)
         return
       end
       if not response.body.content then
-        vim.notify("No source available for frame", "WARN")
+        M.notify("No source available for frame", vim.log.levels.WARN)
         return
       end
       vim.api.nvim_buf_set_lines(buf, 0, 0, true, vim.split(response.body.content, "\n"))
@@ -84,7 +102,7 @@ function M.jump_to_frame(frame, session, set_frame)
   end
 
   if not source.path then
-    vim.notify("No source available for frame", "WARN")
+    M.notify("No source available for frame", vim.log.levels.WARN)
   end
 
   local path = source.path
@@ -93,16 +111,20 @@ function M.jump_to_frame(frame, session, set_frame)
     column = 1
   end
 
-  local bufnr = vim.uri_to_bufnr(
-    M.is_uri(path) and path or vim.uri_from_fname(vim.fn.fnamemodify(path, ":p"))
-  )
+  local bufnr =
+    vim.uri_to_bufnr(M.is_uri(path) and path or vim.uri_from_fname(vim.fn.fnamemodify(path, ":p")))
   vim.fn.bufload(bufnr)
-  open_buf(bufnr, line, column)
+  M.open_buf(bufnr, line, column)
 end
 
 function M.get_selection(start, finish)
   local start_line, start_col = start[2], start[3]
   local finish_line, finish_col = finish[2], finish[3]
+
+  if start_line > finish_line or (start_line == finish_line and start_col > finish_col) then
+    start_line, start_col, finish_line, finish_col = finish_line, finish_col, start_line, start_col
+  end
+
   local lines = vim.fn.getline(start_line, finish_line)
   if #lines == 0 then
     return
@@ -172,6 +194,54 @@ function M.float_element(elem_name)
   local position = { line = line_no, col = col_no }
   local elem = require("dapui.elements." .. elem_name)
   return require("dapui.windows").open_float(elem, position, elem.float_defaults or {})
+end
+
+function M.render_type(maybe_type)
+  if not maybe_type then
+    return ""
+  end
+  local max_length = config.render().max_type_length
+  if not max_length or max_length == -1 then
+    return maybe_type
+  end
+  if max_length == 0 then
+    return ""
+  end
+  if vim.str_utfindex(maybe_type) <= max_length then
+    return maybe_type
+  end
+
+  local byte_length = vim.str_byteindex(maybe_type, max_length)
+  return string.sub(maybe_type, 1, byte_length) .. "..."
+end
+
+---@param value_start integer
+---@param value string
+---@return string[]
+function M.format_value(value_start, value)
+  local formatted = {}
+  local max_lines = config.render().max_value_lines
+  local i = 0
+  --- Use gsplit instead of split because adapters can returns very long values
+  --- and we want to avoid creating thousands of substrings that we won't use.
+  for line in vim.gsplit(value, "\n") do
+    i = i + 1
+
+    if max_lines and i > max_lines then
+      local line_count = 1
+      for _ in value:gmatch("\n") do
+        line_count = line_count + 1
+      end
+
+      formatted[i - 1] = formatted[i - 1] .. ((" ... [%s more lines]"):format(line_count - i + 1))
+      break
+    end
+    if i > 1 then
+      line = string.rep(" ", value_start - 2) .. line
+    end
+    formatted[i] = line
+  end
+  return formatted
 end
 
 return M

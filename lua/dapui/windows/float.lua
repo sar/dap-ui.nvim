@@ -65,6 +65,9 @@ function Float:get_buf()
 end
 
 function Float:jump_to()
+  if vim.fn.mode(true) ~= "n" then
+    vim.cmd([[call feedkeys("\<C-\>\<C-N>", "n")]])
+  end
   api.nvim_set_current_win(self.win_id)
 end
 
@@ -96,7 +99,7 @@ function M.open_float(settings)
   local content_window = api.nvim_open_win(content_buffer, false, opts)
 
   local output_win_id = api.nvim_win_get_number(content_window)
-  vim.fn.setwinvar(output_win_id, "&winhl", "Normal:Normal,FloatBorder:DapUIFloatBorder")
+  vim.fn.setwinvar(output_win_id, "&winhl", "Normal:DapUINormalFloat,FloatBorder:DapUIFloatBorder")
   vim.api.nvim_win_set_option(content_window, "wrap", false)
 
   return Float:new(content_window, position)
